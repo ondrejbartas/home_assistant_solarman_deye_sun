@@ -1,6 +1,8 @@
 import socket
 import yaml
 import logging
+import time
+
 from homeassistant.util import Throttle
 from datetime import datetime
 from .parser import ParameterParser
@@ -21,17 +23,21 @@ class Inverter:
         self._host = host
         self._port = port
         self._mb_slaveid = mb_slaveid
+        self._last_update_of_get_statistics = None
         self._current_val = None
+        self._current_realtime_val = None
         self.status_connection = "Disconnected"
         self.status_lastUpdate = "N/A"
+        self.status_realtime_connection = "Disconnected"
+        self.status_realtime_lastUpdate = "N/A"
         if not lookup_file:
             lookup_file = 'deye_hybrid.yaml'
         elif lookup_file == 'parameters.yaml':
             lookup_file = 'deye_hybrid.yaml'
 
-            
+
         with open(self.path + lookup_file) as f:
-            self.parameter_definition = yaml.full_load(f) 
+            self.parameter_definition = yaml.full_load(f)
 
     def modbus(self, data):
         POLY = 0xA001
@@ -42,23 +48,23 @@ class Inverter:
             for _ in range(8):
                 crc = ((crc >> 1) ^ POLY
                 if (crc & 0x0001)
-                else crc >> 1)  
-        return crc    
+                else crc >> 1)
+        return crc
 
     def get_serial_hex(self):
         serial_hex = hex(self._serial)[2:]
         serial_bytes = bytearray.fromhex(serial_hex)
         serial_bytes.reverse()
         return serial_bytes
-    
+
     def get_read_business_field(self, start, length, mb_fc):
         request_data = bytearray([self._mb_slaveid, mb_fc]) # Function Code
         request_data.extend(start.to_bytes(2, 'big'))
         request_data.extend(length.to_bytes(2, 'big'))
         crc = self.modbus(request_data)
-        request_data.extend(crc.to_bytes(2, 'little'))  
+        request_data.extend(crc.to_bytes(2, 'little'))
         return request_data
-        
+
     def generate_request(self, start, length, mb_fc):
         packet = bytearray([START_OF_MESSAGE])
 
@@ -67,22 +73,22 @@ class Inverter:
         buisiness_field = self.get_read_business_field(start, length, mb_fc)
         packet_data.extend(buisiness_field)
         length = packet_data.__len__()
-        packet.extend(length.to_bytes(2, "little")) 
+        packet.extend(length.to_bytes(2, "little"))
         packet.extend(CONTROL_CODE)
         packet.extend(SERIAL_NO)
-        packet.extend(self.get_serial_hex())    
+        packet.extend(self.get_serial_hex())
         packet.extend(packet_data)
         #Checksum
         checksum = 0
         for i in range(1,len(packet),1):
             checksum += packet[i]
         packet.append(checksum & 0xFF)
-        packet.append(END_OF_MESSAGE)  
-        
-        del packet_data      
+        packet.append(END_OF_MESSAGE)
+
+        del packet_data
         del buisiness_field
         return packet
-    
+
     def validate_checksum(self, packet):
         checksum = 0
         length = len(packet)
@@ -94,35 +100,39 @@ class Inverter:
             return 1
         else:
             return 0
-        
-    
- 
+
+
+
     def send_request (self, params, start, end, mb_fc):
         result = 0
         length = end - start + 1
         request = self.generate_request(start, length, mb_fc)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)
+        sock.settimeout(30)
         try:
             sock.connect((self._host, self._port))
             log.debug(request.hex())
             sock.sendall(request) # Request param 0x3B up to 0x71
-            raw_msg = sock.recv(1024)
+            raw_msg = sock.recv(4096)
             log.debug(raw_msg.hex())
             if self.validate_checksum(raw_msg) == 1:
                 result = 1
-                params.parse(raw_msg, start, length) 
+                params.parse(raw_msg, start, length)
             del raw_msg
         except:
             result = 0
         finally:
-            sock.close()   
+            sock.close()
             del request
         return result
 
-    @Throttle (MIN_TIME_BETWEEN_UPDATES)
+    @Throttle (MIN_TIME_BETWEEN_REALTIME_UPDATES)
     def update (self):
-        self.get_statistics()
+        self.get_realtime_statistics()
+
+        if (not self._last_update_of_get_statistics or (datetime.now() - self._last_update_of_get_statistics > MIN_TIME_BETWEEN_UPDATES )):
+            self.get_statistics()
+
         return
 
 
@@ -137,17 +147,39 @@ class Inverter:
                 # retry once
                 if 0 == self.send_request(params, start, end, mb_fc):
                     result = 0
-                    
-        if result == 1: 
+
+        if result == 1:
             self.status_lastUpdate = datetime.now().strftime("%m/%d/%Y, %H:%M:%S")
-            self.status_connection = "Connected"                               
+            self._last_update_of_get_statistics = datetime.now()
+            self.status_connection = "Connected"
             self._current_val = params.get_result()
         else:
             self.status_connection = "Disconnected"
-            
+
+    def get_realtime_statistics(self):
+        result = 1
+        params = ParameterParser(self.parameter_definition)
+        for request in self.parameter_definition['realtime_requests']:
+            start = request['start']
+            end= request['end']
+            mb_fc = request['mb_functioncode']
+            if 0 == self.send_request(params, start, end, mb_fc):
+                # retry once
+                if 0 == self.send_request(params, start, end, mb_fc):
+                    result = 0
+
+        if result == 1:
+            self.status_realtime_lastUpdate = datetime.now().strftime("%m/%d/%Y, %H:%M:%S")
+            self.status_realtime_connection = "Connected"
+            self._current_realtime_val = params.get_result()
+        else:
+            self.status_realtime_connection = "Disconnected"
 
     def get_current_val(self):
         return self._current_val
+
+    def get_current_realtime_val(self):
+        return self._current_realtime_val
 
     def get_sensors(self):
         params = ParameterParser(self.parameter_definition)

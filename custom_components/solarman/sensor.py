@@ -21,21 +21,22 @@ from .scanner import InverterScanner
 
 _LOGGER = logging.getLogger(__name__)
 _inverter_scanner = InverterScanner()
+SCAN_INTERVAL = MIN_TIME_BETWEEN_REALTIME_UPDATES
 
 def _do_setup_platform(hass: HomeAssistant, config, async_add_entities : AddEntitiesCallback):
-    _LOGGER.debug(f'sensor.py:async_setup_platform: {config}') 
-   
+    _LOGGER.debug(f'sensor.py:async_setup_platform: {config}')
+
     inverter_name = config.get(CONF_NAME)
     inverter_host = config.get(CONF_INVERTER_HOST)
     if inverter_host == "0.0.0.0":
         inverter_host = _inverter_scanner.get_ipaddress()
-        
-   
+
+
     inverter_port = config.get(CONF_INVERTER_PORT)
     inverter_sn = config.get(CONF_INVERTER_SERIAL)
     if inverter_sn == 0:
         inverter_sn = _inverter_scanner.get_serialno()
-    
+
     inverter_mb_slaveid = config.get(CONF_INVERTER_MB_SLAVEID)
     if not inverter_mb_slaveid:
         inverter_mb_slaveid = DEFAULT_INVERTER_MB_SLAVEID
@@ -52,16 +53,17 @@ def _do_setup_platform(hass: HomeAssistant, config, async_add_entities : AddEnti
     #  Prepare the sensor entities.
     hass_sensors = []
     for sensor in inverter.get_sensors():
-        try:
-            if "isstr" in sensor:
-                hass_sensors.append(SolarmanSensorText(inverter_name, inverter, sensor, inverter_sn))
-            else:
-                hass_sensors.append(SolarmanSensor(inverter_name, inverter, sensor, inverter_sn))
-        except BaseException as ex:
-            _LOGGER.error(f'Config error {ex} {sensor}')
-            raise
+        if "isstr" in sensor:
+            hass_sensors.append(SolarmanSensorText(inverter_name, inverter, sensor, inverter_sn))
+        elif "realtime" in sensor:
+            hass_sensors.append(SolarmanRealtimeSensor(inverter_name, inverter, sensor, inverter_sn))
+        else:
+            hass_sensors.append(SolarmanSensor(inverter_name, inverter, sensor, inverter_sn))
+
     hass_sensors.append(SolarmanStatus(inverter_name, inverter, "status_lastUpdate", inverter_sn))
+    hass_sensors.append(SolarmanStatus(inverter_name, inverter, "status_realtime_lastUpdate", inverter_sn))
     hass_sensors.append(SolarmanStatus(inverter_name, inverter, "status_connection", inverter_sn))
+    hass_sensors.append(SolarmanStatus(inverter_name, inverter, "status_realtime_connection", inverter_sn))
 
     _LOGGER.debug(f'sensor.py:_do_setup_platform: async_add_entities')
     _LOGGER.debug(hass_sensors)
@@ -70,15 +72,15 @@ def _do_setup_platform(hass: HomeAssistant, config, async_add_entities : AddEnti
 
 # Set-up from configuration.yaml
 async def async_setup_platform(hass: HomeAssistant, config, async_add_entities : AddEntitiesCallback, discovery_info=None):
-    _LOGGER.debug(f'sensor.py:async_setup_platform: {config}') 
+    _LOGGER.debug(f'sensor.py:async_setup_platform: {config}')
     _do_setup_platform(hass, config, async_add_entities)
-       
+
 # Set-up from the entries in config-flow
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
-    _LOGGER.debug(f'sensor.py:async_setup_entry: {entry.options}') 
+    _LOGGER.debug(f'sensor.py:async_setup_entry: {entry.options}')
     _do_setup_platform(hass, entry.options, async_add_entities)
-    
-   
+
+
 
 #############################################################################################################
 # This is the entity seen by Home Assistant.
@@ -180,3 +182,19 @@ class SolarmanSensor(SolarmanSensorText):
     def unit_of_measurement(self):
         return self.uom
 
+class SolarmanRealtimeSensor(SolarmanSensor):
+    def __init__(self, inverter_name, inverter, sensor, sn):
+        SolarmanSensor.__init__(self, inverter_name, inverter, sensor, sn)
+        self.scan_interval = MIN_TIME_BETWEEN_REALTIME_UPDATES
+        return
+
+    def update(self):
+    #  Update this sensor using the data.
+    #  Get the latest data and use it to update our sensor state.
+    #  Retrieve the sensor data from actual interface
+        self.inverter.update()
+
+        val = self.inverter.get_current_realtime_val()
+        if val is not None:
+            if self._field_name in val:
+                self.p_state = val[self._field_name]
